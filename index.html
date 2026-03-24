@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Global Power Plant Map</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; }
+    #app { display: grid; grid-template-columns: 340px 1fr; height: 100%; }
+    #sidebar { padding: 14px; border-right: 1px solid #ddd; overflow: auto; background: #fff; }
+    #map { width: 100%; height: 100%; }
+    h1 { font-size: 18px; margin: 0 0 10px; }
+    h2 { font-size: 13px; margin: 16px 0 6px; text-transform: uppercase; color: #555; }
+    label { display: block; font-size: 13px; margin: 8px 0 4px; }
+    select, input[type="text"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stats { margin-top: 12px; font-size: 13px; color: #444; }
+    .btns { display: flex; gap: 8px; margin-top: 12px; }
+    button { padding: 8px 10px; border: 1px solid #ccc; background: #f8f8f8; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #efefef; }
+    .note { margin-top: 10px; font-size: 12px; color: #666; line-height: 1.4; }
+    .legend { margin-top: 14px; font-size: 12px; }
+    .legend div { display: flex; align-items: center; margin: 4px 0; }
+    .swatch { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; border: 1px solid rgba(0,0,0,0.2); }
+    .loading { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.95); border: 1px solid #ddd; padding: 8px 12px; border-radius: 8px; z-index: 3; font-size: 13px; }
+    .maplibregl-popup-content { max-width: 320px; }
+    @media (max-width: 900px) {
+      #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      #sidebar { max-height: 42vh; border-right: none; border-bottom: 1px solid #ddd; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="sidebar">
+      <h1>Global Power Plant Map</h1>
+      <div class="note">Interactive viewer for the map-ready GeoJSON. Use the filters below to create view layers by fuel, country, size, age, and renewable status.</div>
+
+      <h2>Filters</h2>
+      <label for="fuelFamily">Fuel family</label>
+      <select id="fuelFamily"><option value="">All</option></select>
+
+      <label for="primaryFuel">Primary fuel</label>
+      <select id="primaryFuel"><option value="">All</option></select>
+
+      <label for="country">Country</label>
+      <select id="country"><option value="">All</option></select>
+
+      <div class="row">
+        <div>
+          <label for="capacityBand">Capacity band</label>
+          <select id="capacityBand"><option value="">All</option></select>
+        </div>
+        <div>
+          <label for="ageBand">Age band</label>
+          <select id="ageBand"><option value="">All</option></select>
+        </div>
+      </div>
+
+      <label for="search">Name or owner contains</label>
+      <input id="search" type="text" placeholder="e.g. EDF, NextEra, Gundremmingen" />
+
+      <label><input id="renewableOnly" type="checkbox" /> Renewable only</label>
+      <label><input id="fossilOnly" type="checkbox" /> Fossil only</label>
+
+      <div class="btns">
+        <button id="resetBtn">Reset filters</button>
+        <button id="fitBtn">Zoom to results</button>
+      </div>
+
+      <div class="stats" id="stats">Loading data…</div>
+
+      <div class="legend">
+        <h2>Legend</h2>
+        <div><span class="swatch" style="background:#d73027"></span>Coal</div>
+        <div><span class="swatch" style="background:#fc8d59"></span>Gas</div>
+        <div><span class="swatch" style="background:#4575b4"></span>Hydro</div>
+        <div><span class="swatch" style="background:#fee08b"></span>Solar</div>
+        <div><span class="swatch" style="background:#91cf60"></span>Wind</div>
+        <div><span class="swatch" style="background:#8073ac"></span>Nuclear</div>
+        <div><span class="swatch" style="background:#999999"></span>Other</div>
+      </div>
+
+      <div class="note">
+        Large datasets can take a few seconds to load. This viewer loads the data in multiple GeoJSON files so it can be uploaded through the GitHub web interface, then clusters points when zoomed out.
+      </div>
+    </div>
+    <div style="position: relative;">
+      <div class="loading" id="loading">Loading map data…</div>
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+    const colorForFuel = (fuel) => {
+      const f = (fuel || '').toLowerCase();
+      if (f.includes('coal')) return '#d73027';
+      if (f.includes('gas')) return '#fc8d59';
+      if (f.includes('hydro')) return '#4575b4';
+      if (f.includes('solar')) return '#fee08b';
+      if (f.includes('wind')) return '#91cf60';
+      if (f.includes('nuclear')) return '#8073ac';
+      if (f.includes('oil')) return '#f46d43';
+      if (f.includes('biomass')) return '#66bd63';
+      if (f.includes('waste')) return '#8c510a';
+      if (f.includes('storage')) return '#5e3c99';
+      return '#999999';
+    };
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://demotiles.maplibre.org/style.json',
+      center: [10, 20],
+      zoom: 1.4,
+      attributionControl: true
+    });
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+    let originalData;
+    let filteredData;
+
+    const controls = {
+      fuelFamily: document.getElementById('fuelFamily'),
+      primaryFuel: document.getElementById('primaryFuel'),
+      country: document.getElementById('country'),
+      capacityBand: document.getElementById('capacityBand'),
+      ageBand: document.getElementById('ageBand'),
+      search: document.getElementById('search'),
+      renewableOnly: document.getElementById('renewableOnly'),
+      fossilOnly: document.getElementById('fossilOnly'),
+      resetBtn: document.getElementById('resetBtn'),
+      fitBtn: document.getElementById('fitBtn'),
+      stats: document.getElementById('stats'),
+      loading: document.getElementById('loading')
+    };
+
+    function uniqueSorted(values) {
+      return [...new Set(values.filter(v => v !== null && v !== undefined && String(v).trim() !== ''))].sort((a, b) => String(a).localeCompare(String(b)));
+    }
+
+    function populateSelect(select, values) {
+      for (const value of values) {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = value;
+        select.appendChild(opt);
+      }
+    }
+
+    function passesFilter(p) {
+      const q = controls.search.value.trim().toLowerCase();
+      if (controls.fuelFamily.value && p.fuel_family !== controls.fuelFamily.value) return false;
+      if (controls.primaryFuel.value && p.primary_fuel !== controls.primaryFuel.value) return false;
+      if (controls.country.value && p.country_long !== controls.country.value) return false;
+      if (controls.capacityBand.value && p.capacity_band !== controls.capacityBand.value) return false;
+      if (controls.ageBand.value && p.age_band !== controls.ageBand.value) return false;
+      if (controls.renewableOnly.checked && !p.is_renewable) return false;
+      if (controls.fossilOnly.checked && !p.is_fossil) return false;
+      if (q) {
+        const hay = `${p.name || ''} ${p.owner || ''} ${p.plant_label || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }
+
+    function computeBounds(features) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const f of features) {
+        const c = f.geometry && f.geometry.coordinates;
+        if (!c || c.length < 2) continue;
+        const [x, y] = c;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      if (!isFinite(minX)) return null;
+      return [[minX, minY], [maxX, maxY]];
+    }
+
+    function updateStats() {
+      const count = filteredData.features.length;
+      const cap = filteredData.features.reduce((sum, f) => sum + (Number(f.properties.capacity_mw) || 0), 0);
+      controls.stats.innerHTML = `${count.toLocaleString()} plants shown<br>${Math.round(cap).toLocaleString()} MW total visible capacity`;
+    }
+
+    function applyFilters() {
+      const feats = originalData.features.filter(f => passesFilter(f.properties));
+      filteredData = { type: 'FeatureCollection', features: feats };
+      map.getSource('plants').setData(filteredData);
+      updateStats();
+    }
+
+    function fitToResults() {
+      if (!filteredData || !filteredData.features.length) return;
+      const bounds = computeBounds(filteredData.features);
+      if (bounds) map.fitBounds(bounds, { padding: 30, duration: 600, maxZoom: 7 });
+    }
+
+    function popupHtml(p) {
+      const num = (v, digits = 0) => (v === null || v === undefined || v === '' || isNaN(v)) ? '—' : Number(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+      return `
+        <strong>${p.plant_label || p.name || 'Power plant'}</strong><br>
+        Country: ${p.country_long || '—'}<br>
+        Fuel: ${p.primary_fuel || '—'}<br>
+        Capacity: ${num(p.capacity_mw, 1)} MW<br>
+        Commissioned: ${p.commissioning_year || '—'}<br>
+        Owner: ${p.owner || '—'}<br>
+        Latest generation: ${num(p.gen_latest_gwh, 1)} GWh (${p.gen_latest_year || '—'}, ${p.gen_latest_type || '—'})
+      `;
+    }
+
+    async function init() {
+      const partFiles = ['data_part_1.geojson', 'data_part_2.geojson', 'data_part_3.geojson'];
+      const parts = [];
+      for (let i = 0; i < partFiles.length; i++) {
+        controls.loading.textContent = `Loading map data… (${i + 1}/${partFiles.length})`;
+        const resp = await fetch(partFiles[i]);
+        if (!resp.ok) throw new Error(`Failed to load ${partFiles[i]}`);
+        parts.push(await resp.json());
+      }
+      originalData = {
+        type: 'FeatureCollection',
+        features: parts.flatMap(p => p.features || [])
+      };
+
+      const features = originalData.features || [];
+      populateSelect(controls.fuelFamily, uniqueSorted(features.map(f => f.properties.fuel_family)));
+      populateSelect(controls.primaryFuel, uniqueSorted(features.map(f => f.properties.primary_fuel)));
+      populateSelect(controls.country, uniqueSorted(features.map(f => f.properties.country_long)));
+      populateSelect(controls.capacityBand, uniqueSorted(features.map(f => f.properties.capacity_band)));
+      populateSelect(controls.ageBand, uniqueSorted(features.map(f => f.properties.age_band)));
+
+      map.on('load', () => {
+        map.addSource('plants', {
+          type: 'geojson',
+          data: originalData,
+          cluster: true,
+          clusterRadius: 45,
+          clusterMaxZoom: 8
+        });
+
+        map.addLayer({
+          id: 'clusters',
+          type: 'circle',
+          source: 'plants',
+          filter: ['has', 'point_count'],
+          paint: {
+            'circle-color': ['step', ['get', 'point_count'], '#88ccee', 50, '#44aadd', 250, '#1177aa', 1000, '#0b4f71'],
+            'circle-radius': ['step', ['get', 'point_count'], 14, 50, 18, 250, 24, 1000, 30],
+            'circle-opacity': 0.9
+          }
+        });
+
+        map.addLayer({
+          id: 'cluster-count',
+          type: 'symbol',
+          source: 'plants',
+          filter: ['has', 'point_count'],
+          layout: {
+            'text-field': ['get', 'point_count_abbreviated'],
+            'text-size': 12
+          },
+          paint: { 'text-color': '#ffffff' }
+        });
+
+        map.addLayer({
+          id: 'unclustered',
+          type: 'circle',
+          source: 'plants',
+          filter: ['!', ['has', 'point_count']],
+          paint: {
+            'circle-radius': [
+              'interpolate', ['linear'], ['coalesce', ['to-number', ['get', 'capacity_mw']], 0],
+              0, 3,
+              50, 4,
+              250, 6,
+              1000, 10,
+              3000, 14
+            ],
+            'circle-color': [
+              'match', ['downcase', ['coalesce', ['get', 'primary_fuel'], '']],
+              'coal', '#d73027',
+              'gas', '#fc8d59',
+              'hydro', '#4575b4',
+              'solar', '#fee08b',
+              'wind', '#91cf60',
+              'nuclear', '#8073ac',
+              'oil', '#f46d43',
+              'biomass', '#66bd63',
+              'waste', '#8c510a',
+              'storage', '#5e3c99',
+              '#999999'
+            ],
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 1,
+            'circle-opacity': 0.85
+          }
+        });
+
+        map.on('click', 'clusters', async (e) => {
+          const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
+          const clusterId = features[0].properties.cluster_id;
+          const zoom = await map.getSource('plants').getClusterExpansionZoom(clusterId);
+          map.easeTo({ center: features[0].geometry.coordinates, zoom });
+        });
+
+        let popup;
+        map.on('click', 'unclustered', (e) => {
+          const feature = e.features[0];
+          const coords = feature.geometry.coordinates.slice();
+          const p = feature.properties;
+          if (popup) popup.remove();
+          popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true })
+            .setLngLat(coords)
+            .setHTML(popupHtml(p))
+            .addTo(map);
+        });
+
+        map.on('mouseenter', 'clusters', () => map.getCanvas().style.cursor = 'pointer');
+        map.on('mouseleave', 'clusters', () => map.getCanvas().style.cursor = '');
+        map.on('mouseenter', 'unclustered', () => map.getCanvas().style.cursor = 'pointer');
+        map.on('mouseleave', 'unclustered', () => map.getCanvas().style.cursor = '');
+
+        filteredData = originalData;
+        updateStats();
+        controls.loading.style.display = 'none';
+      });
+
+      [controls.fuelFamily, controls.primaryFuel, controls.country, controls.capacityBand, controls.ageBand, controls.renewableOnly, controls.fossilOnly].forEach(el => el.addEventListener('change', applyFilters));
+      controls.search.addEventListener('input', applyFilters);
+      controls.resetBtn.addEventListener('click', () => {
+        controls.fuelFamily.value = '';
+        controls.primaryFuel.value = '';
+        controls.country.value = '';
+        controls.capacityBand.value = '';
+        controls.ageBand.value = '';
+        controls.search.value = '';
+        controls.renewableOnly.checked = false;
+        controls.fossilOnly.checked = false;
+        applyFilters();
+        map.easeTo({ center: [10, 20], zoom: 1.4, duration: 600 });
+      });
+      controls.fitBtn.addEventListener('click', fitToResults);
+    }
+
+    init().catch(err => {
+      controls.loading.textContent = 'Failed to load data. Check that index.html and all data_part_*.geojson files are in the same folder.';
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
